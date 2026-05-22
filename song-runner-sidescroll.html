@@ -82,10 +82,10 @@ cv.width=W;cv.height=H;
 /* ── TUNING KNOBS ─────────────────────────────────────────────── */
 const T={
   scrollBase:    380,   // base scroll speed px/s — Alto's pace
-  gravity:       850,   // downward pull px/s² — punchier landings at speed
-  maxFall:       520,   // terminal velocity px/s
-  jumpVel:      -480,   // first jump velocity — big air at speed
-  jumpVel2:     -340,   // double jump (weaker)
+  gravity:       560,   // downward pull px/s² — lower = floatier Alto's feel
+  maxFall:       480,   // terminal velocity px/s
+  jumpVel:      -520,   // first jump velocity — bigger to compensate floatier gravity
+  jumpVel2:     -370,   // double jump (weaker)
   maxJumps:        2,
   hillAmp:       160,   // hill height px — dramatic hills
   hillFreq:    0.0009,  // hill frequency — long hills, few per screen
@@ -463,12 +463,17 @@ function spawnChasm(width){
   chasms.push({wxStart:lipWx, wxEnd:lipWx+w, dead:false});
 }
 function spawnDebris(count){
-  // Static road obstacles — barrels, crates, rocks. Player must jump them.
   const types=['barrel','crate','rock','log'];
+  const spacing=420+Math.random()*280; // wide spacing — one obstacle per jump, not a wall
   for(let i=0;i<(count||1);i++){
-    const gap=180+Math.random()*120; // space between clusters
+    let spawnWx=worldX+AHEAD+i*spacing;
+    // Scan for flat terrain so obstacles land somewhere clearable
+    for(let attempt=0;attempt<20;attempt++){
+      if(Math.abs(terrainSlope(spawnWx))<0.12)break;
+      spawnWx+=24;
+    }
     debris.push({
-      wx:worldX+AHEAD+i*gap,
+      wx:spawnWx,
       type:types[Math.floor(Math.random()*types.length)],
       w:22+Math.random()*14, h:24+Math.random()*14,
       dead:false,
@@ -587,19 +592,14 @@ function update(dt){
       if(impact>150){ burst(pl.x,pl.y,'land'); shake(impact/55,0.14); sfxLand(impact); }
     }
   } else {
-    // On terrain
+    // On terrain — let the terrain shape do the work, no momentum hacks
     if(!pl.onGround){
-      // Just landed
       if(pl.vy>150){ burst(pl.x,pl.y,'land'); shake(pl.vy/55,0.14); sfxLand(pl.vy); }
       pl.jumpsLeft=T.maxJumps;
       pl.flipping=false; pl.flipAngle=0;
     }
-    // Carry slope momentum — terrain rising pushes car upward.
-    // At the peak this upward vy is preserved into the air naturally.
-    const slopeVy=terrainSlope(worldX)*scrollSpd;
     pl.y=groundY;
-    // Only carry UPWARD slope momentum (negative vy = up); flatten on downhills
-    pl.vy=slopeVy<0 ? slopeVy*1.6 : 0;
+    pl.vy=0;
     pl.onGround=true;
   }
 
