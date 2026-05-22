@@ -81,15 +81,15 @@ cv.width=W;cv.height=H;
 
 /* ── TUNING KNOBS ─────────────────────────────────────────────── */
 const T={
-  scrollBase:    380,   // base scroll speed px/s — Alto's pace
-  gravity:       560,   // downward pull px/s² — lower = floatier Alto's feel
-  maxFall:       480,   // terminal velocity px/s
-  jumpVel:      -520,   // first jump velocity — bigger to compensate floatier gravity
-  jumpVel2:     -370,   // double jump (weaker)
+  scrollBase:    380,   // base scroll speed px/s
+  gravityTerrain: 380,  // light gravity for terrain-launched air — long gliding arc
+  gravityJump:    720,  // heavier gravity for manual jumps — snappy arc
+  maxFall:        500,
+  jumpVel:       -480,  // manual jump velocity
+  jumpVel2:      -340,  // double jump
   maxJumps:        2,
-  hillAmp:       160,   // hill height px — dramatic hills
-  hillFreq:    0.0009,  // hill frequency — long hills, few per screen
-  hillSpeedMult:   7,   // slope × this = speed factor — strong downhill rush
+  hillAmp:       160,   // hill height px
+  hillFreq:    0.0005,  // longer, fewer hills — more time to build speed on descents
   chaserCloseSpd:  90,  // px/s chaser closes in screen-space
   chaserGap:     200,   // px behind player chasers settle at
   chaserShootCd: 10.0,  // seconds between individual chaser shots
@@ -143,67 +143,14 @@ const PHASES={
 
 /* ── TIMELINE ─────────────────────────────────────────────────── */
 const SONG_LEN=90;
+// TERRAIN FOCUS MODE — obstacles/chasers stripped out, just hills + speed ramps
 const TIMELINE=[
-  {t:2,  type:'phase',  v:'day',  label:'DAY'},
-  {t:3,  type:'pickup', v:'smoke'},
-  {t:4,  type:'debris', v:1},                    // first jump challenge early
-  {t:6,  type:'traffic',v:1},
-  {t:8,  type:'debris', v:2},
-  {t:10, type:'chaser', v:1,      label:'CHASER'},
-  {t:12, type:'debris', v:1},
-  {t:13, type:'traffic',v:1},
-  {t:15, type:'debris', v:2},
-  {t:16, type:'chasm',            label:'CHASM'},
-  {t:18, type:'pickup', v:'tack'},
-  {t:19, type:'debris', v:2},
-  {t:20, type:'traffic',v:2},
-  {t:21, type:'debris', v:1},
-  {t:22, type:'rocket',           label:'ROCKET'},
-  {t:24, type:'debris', v:2},
-  {t:25, type:'chaser', v:1},
-  {t:27, type:'debris', v:3},
-  {t:28, type:'traffic',v:2},
-  {t:30, type:'phase',  v:'dusk', label:'DUSK'},
-  {t:31, type:'debris', v:2},
-  {t:32, type:'pickup', v:'boost',label:'BOOST'},
-  {t:34, type:'chaser', v:2,      label:'CHASE'},
-  {t:35, type:'debris', v:2},
-  {t:36, type:'traffic',v:2},
-  {t:38, type:'debris', v:3},
-  {t:39, type:'speed',  v:1.3,   label:'SPEED+'},
-  {t:41, type:'chasm',            label:'CHASM'},
-  {t:42, type:'debris', v:2},
-  {t:43, type:'rocket'},
-  {t:45, type:'debris', v:3},
-  {t:46, type:'chaser', v:2},
-  {t:48, type:'traffic',v:3},
-  {t:49, type:'debris', v:2},
-  {t:50, type:'phase',  v:'night',label:'NIGHT'},
-  {t:52, type:'breather',         label:'BREATHE'},
-  {t:53, type:'debris', v:1},
-  {t:55, type:'pickup', v:'smoke'},
-  {t:56, type:'debris', v:2},
-  {t:57, type:'traffic',v:2},
-  {t:59, type:'debris', v:3},
-  {t:60, type:'speed',  v:1.6,   label:'SPEED++'},
-  {t:62, type:'chaser', v:3,     label:'ASSAULT'},
-  {t:63, type:'debris', v:3},
-  {t:65, type:'chasm', v:520,     label:'CHASM'},
-  {t:66, type:'debris', v:2},
-  {t:67, type:'rocket'},
-  {t:69, type:'debris', v:3},
-  {t:70, type:'traffic',v:3},
-  {t:72, type:'debris', v:3},
-  {t:73, type:'pickup', v:'tack'},
-  {t:74, type:'debris', v:2},
-  {t:75, type:'chaser', v:3},
-  {t:77, type:'debris', v:3},
-  {t:78, type:'rocket'},
-  {t:80, type:'chaser', v:2,     label:'FINALE'},
-  {t:81, type:'debris', v:2},
-  {t:84, type:'traffic',v:2},
-  {t:85, type:'debris', v:3},
-  {t:87, type:'phase',  v:'dawn',label:'FINISH'},
+  {t:2,  type:'phase', v:'day',  label:'DAY'},
+  {t:30, type:'phase', v:'dusk', label:'DUSK'},
+  {t:39, type:'speed', v:1.3,   label:'SPEED+'},
+  {t:50, type:'phase', v:'night',label:'NIGHT'},
+  {t:60, type:'speed', v:1.6,   label:'SPEED++'},
+  {t:87, type:'phase', v:'dawn', label:'FINISH'},
 ];
 
 /* ── AUDIO ENGINE ─────────────────────────────────────────────── */
@@ -341,7 +288,8 @@ function shake(amp,dur){shakeAmp=Math.max(shakeAmp,amp);shakeTime=Math.max(shake
 
 const pl={x:CAR_X,y:ROAD_BASE,vy:0,onGround:true,jumpsLeft:T.maxJumps,
           inv:0,weapon:null,shootCd:0,tackCd:0,
-          flipAngle:0,flipping:false,flipDir:1};
+          flipAngle:0,flipping:false,flipDir:1,
+          terrainLaunched:false};
 
 // Same-direction traffic (player overtakes from behind)
 let carTilt=0;       // smoothed tilt angle for player car (radians)
@@ -389,6 +337,7 @@ function doJump(){
   if(pl.jumpsLeft>0){
     pl.vy=pl.jumpsLeft===T.maxJumps?T.jumpVel:T.jumpVel2;
     pl.onGround=false;pl.jumpsLeft--;
+    pl.terrainLaunched=false; // manual jump = snappy gravity
     burst(pl.x,pl.y,'dust');
     sfxJump();
   } else if(!pl.onGround&&!pl.flipping){
@@ -539,20 +488,20 @@ function loop(now){
 
 /* ── UPDATE ───────────────────────────────────────────────────── */
 function update(dt){
-  // Hill speed using smoothstep terrain slope — gentler effect
-  const slope=terrainSlope(worldX);
-  // Throttle: Up arrow / ArrowUp builds speed, releases decay back
+  // Throttle
   const throttling = keys['ArrowUp'] || keys['w'] || keys['W'];
   if(throttling) throttleMult=Math.min(T.throttleMax, throttleMult+T.throttleAccel*dt);
   else           throttleMult=Math.max(1.0, throttleMult-T.throttleDecay*dt);
 
   const boost=boostTimer>0?T.boostMult:1;
   const sp=(breathing?.55:1)*baseSpeed*boost*throttleMult;
-  const hillMult=Math.max(0.72,Math.min(2.2,1+slope*T.hillSpeedMult));
-  const targetSpd=T.scrollBase*sp*hillMult;
-  // Momentum: quicker to gain speed downhill, slower to lose it uphill
-  const lag=targetSpd>scrollSpd?3.5:2.0;
-  scrollSpd+=(targetSpd-scrollSpd)*Math.min(1,dt*lag);
+
+  // Constant scroll speed — terrain shapes the feel, not speed swings.
+  // Gentle downhill bonus only (no uphill penalty).
+  const slope=terrainSlope(worldX);
+  const slopeBonus=Math.max(0, slope*0.2); // positive slope = terrain going down = bonus
+  const targetSpd=T.scrollBase*sp*(1+slopeBonus);
+  scrollSpd+=(targetSpd-scrollSpd)*0.25*dt; // smooth, consistent acceleration
 
   if(boostTimer>0)boostTimer-=dt;
 
@@ -581,26 +530,32 @@ function update(dt){
   const groundY=inChasm ? H+100 : terrainY(worldX);
 
   if(pl.y < groundY || pl.vy < 0){
-    // Airborne: car is above terrain surface — apply gravity
-    pl.vy=Math.min(pl.vy+T.gravity*dt, T.maxFall);
+    // Airborne — terrain launches use light gravity, manual jumps use heavier gravity
+    const grav=pl.terrainLaunched ? T.gravityTerrain : T.gravityJump;
+    pl.vy=Math.min(pl.vy+grav*dt, T.maxFall);
     pl.y+=pl.vy*dt;
     pl.onGround=false;
-    // Landing check
     if(pl.y>=groundY){
       const impact=pl.vy;
       pl.y=groundY; pl.vy=0; pl.onGround=true; pl.jumpsLeft=T.maxJumps;
+      pl.terrainLaunched=false;
       if(impact>150){ burst(pl.x,pl.y,'land'); shake(impact/55,0.14); sfxLand(impact); }
     }
   } else {
-    // On terrain — let the terrain shape do the work, no momentum hacks
+    // On terrain
     if(!pl.onGround){
       if(pl.vy>150){ burst(pl.x,pl.y,'land'); shake(pl.vy/55,0.14); sfxLand(pl.vy); }
       pl.jumpsLeft=T.maxJumps;
       pl.flipping=false; pl.flipAngle=0;
     }
-    pl.y=groundY;
-    pl.vy=0;
-    pl.onGround=true;
+    // Detect terrain launch: cresting a hill (terrain drops away faster than gravity)
+    const prevGroundY=terrainY(worldX - scrollSpd*dt);
+    if(pl.onGround && groundY > prevGroundY + 2){
+      // Terrain is dropping away — go airborne naturally with light gravity
+      pl.terrainLaunched=true;
+    } else {
+      pl.y=groundY; pl.vy=0; pl.onGround=true;
+    }
   }
 
   // Fell into a chasm — damage and snap to far edge
