@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>SONG RUNNER</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;background:#000;overflow:hidden;font-family:'VT323',monospace;}
+  #wrap{width:100vw;height:100vh;display:flex;align-items:center;justify-content:center;}
+  canvas{display:block;image-rendering:pixelated;}
+  #crt{position:absolute;inset:0;pointer-events:none;z-index:10;
+    background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0,rgba(0,0,0,0) 2px,rgba(0,0,0,.10) 3px,rgba(0,0,0,0) 4px),
+    radial-gradient(ellipse at center,transparent 60%,rgba(0,0,0,.45) 100%);}
+  .screen{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:20px;text-align:center;
+    background:radial-gradient(ellipse,rgba(8,8,20,.92),rgba(2,2,8,.98));}
+  .title{font-family:'Press Start 2P';font-size:28px;color:#ff2e88;
+    text-shadow:3px 3px 0 #000,0 0 30px rgba(255,46,136,.7);line-height:1.5;}
+  .sub{font-size:22px;color:#16f0c8;max-width:500px;line-height:1.3;}
+  .hint{font-size:18px;color:#6a6a9a;max-width:560px;line-height:1.5;}
+  button{font-family:'Press Start 2P';font-size:13px;cursor:pointer;color:#000;
+    background:#16f0c8;border:none;padding:14px 20px;box-shadow:4px 4px 0 #000;}
+  button:active{transform:translate(2px,2px);box-shadow:2px 2px 0 #000;}
+  input[type=file]{color:#6a6a9a;font-family:'VT323';font-size:17px;}
+  #hud{position:absolute;top:0;left:0;right:0;z-index:15;padding:12px 16px;
+    display:flex;justify-content:space-between;font-family:'VT323';font-size:22px;
+    color:#cfd2e8;pointer-events:none;}
+  #tl{position:absolute;bottom:10px;left:16px;right:16px;z-index:15;pointer-events:none;}
+  #tlbar{height:8px;background:#1c1c2a;border:1px solid #2c2c44;position:relative;}
+  #tlfill{position:absolute;top:0;left:0;bottom:0;width:0;
+    background:linear-gradient(90deg,#16f0c8,#ff2e88);}
+  .hidden{display:none!important;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="crt"></div>
+  <div id="hud" class="hidden">
+    <span id="hp">♥♥♥</span>
+    <span id="weapon">—</span>
+    <span id="spd">1.0×</span>
+  </div>
+  <div id="tl" class="hidden">
+    <div id="tlbar"><div id="tlfill"></div></div>
+  </div>
+  <div id="sstart" class="screen">
+    <div class="title">SONG<br>RUNNER</div>
+    <div class="sub">The song is the level.<br>Finish it to escape.</div>
+    <div class="hint">
+      SPACE / tap top — jump (double jump!)<br>
+      F / tap bottom-right — shoot forward<br>
+      S / tap bottom-left — drop tack strip (spins out chasers)<br>
+      ↑ hold — throttle · Hit the ramp with speed to cross the gap
+    </div>
+    <div><input type="file" id="audio" accept="audio/*"></div>
+    <button id="go">START</button>
+  </div>
+  <div id="send" class="screen hidden">
+    <div class="title" id="etitle">ESCAPED</div>
+    <div class="sub" id="esub"></div>
+    <button id="again">RUN IT BACK</button>
+  </div>
+</div>
+<audio id="track" preload="auto"></audio>
+<script>
+/* ================================================================
+   SONG RUNNER — side scroller v5
+   - Cars go SAME direction as player (you overtake from behind)
+   - Smoothstep terrain: flat sections at peaks and valleys
+   - Chaser bullets stop at rising terrain
+   - Forward shooting: SPACE fires a bullet AND jumps
+   ================================================================ */
+
+const cv=document.getElementById('c');
+const ctx=cv.getContext('2d');
+const W=800,H=500;
+cv.width=W;cv.height=H;
+
+/* ── TUNING KNOBS ─────────────────────────────────────────────── */
+const T={
+  scrollBase:    380,   // base scroll speed px/s — Alto's pace
+  gravity:       850,   // downward pull px/s² — punchier landings at speed
+  maxFall:       520,   // terminal velocity px/s
+  jumpVel:      -480,   // first jump velocity — big air at speed
+  jumpVel2:     -340,   // double jump (weaker)
+  maxJumps:        2,
+  hillAmp:       160,   // hill height px — dramatic hills
+  hillFreq:    0.0009,  // hill frequency — long hills, few per screen
+  hillSpeedMult:   7,   // slope × this = speed factor — strong downhill rush
+  chaserCloseSpd:  90,  // px/s chaser closes in screen-space
+  chaserGap:     200,   // px behind player chasers settle at
+  chaserShootCd: 10.0,  // seconds between individual chaser shots
+  bulletBack:    110,   // chaser bullet screen speed px/s — slower, more readable
+  bulletFwd:     750,   // player bullet world speed px/s — outruns you now
+  rocketWarn:    2.5,   // seconds of warning before rocket strikes
+  invTime:       1.8,   // invincibility after hit seconds
+  chaserGlobalCd: 3.5, // minimum seconds between ANY chaser shots
+  trafficSpeed:   40,   // world speed of same-direction traffic — near-stationary obstacles
+  boostDur:      2.5,
+  boostMult:     1.55,
+  throttleMax:   1.5,   // max speed multiplier when holding throttle
+  throttleAccel: 1.2,   // how fast throttle builds px/s of multiplier per second
+  throttleDecay: 0.8,   // how fast speed bleeds off when releasing
+};
+
+/* ── TERRAIN ──────────────────────────────────────────────────────
+   Smoothstep-based: flat sections at peaks AND valleys.
+   terrainY(wx) takes a world-x and returns screen-y.
+   All entities must use their own wx — never mixed coordinates.    */
+const ROAD_BASE=H*0.62;
+const CAR_X=W*0.22;
+
+function terrainY(wx){
+  const raw=(Math.sin(wx*T.hillFreq)+1)*0.5; // 0→1 symmetric
+  // Power bias < 1 pushes curve toward 1 (downhill) — terrain spends ~65% going down
+  const biased=Math.pow(raw,0.55);
+  const s=biased*biased*(3-2*biased);         // smoothstep on biased value
+  return ROAD_BASE+(s-0.5)*2*T.hillAmp;
+}
+function terrainSlope(wx){
+  const d=5;
+  return(terrainY(wx+d)-terrainY(wx-d))/(2*d);
+}
+
+/* ── PALETTES ─────────────────────────────────────────────────── */
+const PHASES={
+  day: {skyTop:'#1a3560',skyBot:'#e8a030',ground:'#2a1f0a',road:'#28283a',
+        roadLine:'rgba(255,255,255,0.28)',mtn:'#192a44',treeFar:'#193320',
+        treeNear:'#0f2010',cloud:'rgba(255,255,255,0.13)',sun:'#ffe055',sunGlow:'rgba(255,224,80,0.22)'},
+  dusk:{skyTop:'#180a28',skyBot:'#ff5010',ground:'#1a0f04',road:'#201820',
+        roadLine:'rgba(255,190,80,0.22)',mtn:'#28101e',treeFar:'#1e0816',
+        treeNear:'#100408',cloud:'rgba(255,90,40,0.18)',sun:'#ff7820',sunGlow:'rgba(255,90,20,0.28)'},
+  night:{skyTop:'#020208',skyBot:'#06060f',ground:'#060608',road:'#0e0e18',
+         roadLine:'rgba(80,80,160,0.18)',mtn:'#06060c',treeFar:'#040408',
+         treeNear:'#020204',cloud:'rgba(20,20,70,0.28)',sun:'#c0d0ff',sunGlow:'rgba(160,180,255,0.14)'},
+  dawn:{skyTop:'#080618',skyBot:'#ff9858',ground:'#1a0e06',road:'#1c1620',
+        roadLine:'rgba(255,170,100,0.22)',mtn:'#180e24',treeFar:'#12081e',
+        treeNear:'#08040e',cloud:'rgba(255,140,90,0.18)',sun:'#ffcc80',sunGlow:'rgba(255,170,90,0.24)'},
+};
+
+/* ── TIMELINE ─────────────────────────────────────────────────── */
+const SONG_LEN=90;
+const TIMELINE=[
+  {t:2,  type:'phase',  v:'day',  label:'DAY'},
+  {t:3,  type:'pickup', v:'smoke'},
+  {t:4,  type:'debris', v:1},                    // first jump challenge early
+  {t:6,  type:'traffic',v:1},
+  {t:8,  type:'debris', v:2},
+  {t:10, type:'chaser', v:1,      label:'CHASER'},
+  {t:12, type:'debris', v:1},
+  {t:13, type:'traffic',v:1},
+  {t:15, type:'debris', v:2},
+  {t:16, type:'chasm',            label:'CHASM'},
+  {t:18, type:'pickup', v:'tack'},
+  {t:19, type:'debris', v:2},
+  {t:20, type:'traffic',v:2},
+  {t:21, type:'debris', v:1},
+  {t:22, type:'rocket',           label:'ROCKET'},
+  {t:24, type:'debris', v:2},
+  {t:25, type:'chaser', v:1},
+  {t:27, type:'debris', v:3},
+  {t:28, type:'traffic',v:2},
+  {t:30, type:'phase',  v:'dusk', label:'DUSK'},
+  {t:31, type:'debris', v:2},
+  {t:32, type:'pickup', v:'boost',label:'BOOST'},
+  {t:34, type:'chaser', v:2,      label:'CHASE'},
+  {t:35, type:'debris', v:2},
+  {t:36, type:'traffic',v:2},
+  {t:38, type:'debris', v:3},
+  {t:39, type:'speed',  v:1.3,   label:'SPEED+'},
+  {t:41, type:'chasm',            label:'CHASM'},
+  {t:42, type:'debris', v:2},
+  {t:43, type:'rocket'},
+  {t:45, type:'debris', v:3},
+  {t:46, type:'chaser', v:2},
+  {t:48, type:'traffic',v:3},
+  {t:49, type:'debris', v:2},
+  {t:50, type:'phase',  v:'night',label:'NIGHT'},
+  {t:52, type:'breather',         label:'BREATHE'},
+  {t:53, type:'debris', v:1},
+  {t:55, type:'pickup', v:'smoke'},
+  {t:56, type:'debris', v:2},
+  {t:57, type:'traffic',v:2},
+  {t:59, type:'debris', v:3},
+  {t:60, type:'speed',  v:1.6,   label:'SPEED++'},
+  {t:62, type:'chaser', v:3,     label:'ASSAULT'},
+  {t:63, type:'debris', v:3},
+  {t:65, type:'chasm', v:520,     label:'CHASM'},
+  {t:66, type:'debris', v:2},
+  {t:67, type:'rocket'},
+  {t:69, type:'debris', v:3},
+  {t:70, type:'traffic',v:3},
+  {t:72, type:'debris', v:3},
+  {t:73, type:'pickup', v:'tack'},
+  {t:74, type:'debris', v:2},
+  {t:75, type:'chaser', v:3},
+  {t:77, type:'debris', v:3},
+  {t:78, type:'rocket'},
+  {t:80, type:'chaser', v:2,     label:'FINALE'},
+  {t:81, type:'debris', v:2},
+  {t:84, type:'traffic',v:2},
+  {t:85, type:'debris', v:3},
+  {t:87, type:'phase',  v:'dawn',label:'FINISH'},
+];
+
+/* ── AUDIO ENGINE ─────────────────────────────────────────────── */
+let audioCtx=null,engineGain=null,engineOsc1=null,engineOsc2=null,engineOsc3=null;
+
+function initAudio(){
+  if(audioCtx)return;
+  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+
+  // Three slightly detuned sawtooth oscillators — the beating between them
+  // creates the organic "brrr" of an engine without needing files
+  engineOsc1=audioCtx.createOscillator(); engineOsc1.type='sawtooth';
+  engineOsc2=audioCtx.createOscillator(); engineOsc2.type='sawtooth';
+  engineOsc3=audioCtx.createOscillator(); engineOsc3.type='sawtooth';
+  engineOsc1.frequency.value=68;
+  engineOsc2.frequency.value=71;   // 3Hz apart → slow organic beat
+  engineOsc3.frequency.value=34;   // sub-octave adds body
+
+  // Hard low-pass at 160Hz — kills every harmonic that sounds like a whine
+  // leaves only the low thud/rumble of the fundamental
+  const lpf=audioCtx.createBiquadFilter();
+  lpf.type='lowpass'; lpf.frequency.value=160; lpf.Q.value=1.4;
+
+  engineGain=audioCtx.createGain();
+  engineGain.gain.value=0;
+
+  engineOsc1.connect(lpf); engineOsc2.connect(lpf); engineOsc3.connect(lpf);
+  lpf.connect(engineGain);
+  engineGain.connect(audioCtx.destination);
+
+  engineOsc1.start(); engineOsc2.start(); engineOsc3.start();
+}
+
+function updateEngineSound(spd){
+  if(!audioCtx||!engineOsc1)return;
+  const ratio=Math.max(0,spd/T.scrollBase);
+  // Shift all three oscillators up together with speed — idle ~65Hz, full ~130Hz
+  engineOsc1.frequency.setTargetAtTime(65+ratio*65,audioCtx.currentTime,0.15);
+  engineOsc2.frequency.setTargetAtTime(68+ratio*65,audioCtx.currentTime,0.15);
+  engineOsc3.frequency.setTargetAtTime(32+ratio*32,audioCtx.currentTime,0.15);
+  // Only audible when throttling or boosting — stays out of the way of music otherwise
+  const throttling=keys['ArrowUp']||keys['w']||keys['W'];
+  const vol=gstate==='playing'?(throttling||boostTimer>0?0.14:0.04):0;
+  engineGain.gain.setTargetAtTime(vol,audioCtx.currentTime,0.2);
+}
+
+function sfxJump(){
+  if(!audioCtx)return;
+  // Noise whoosh — filtered white noise sweeping from low to high frequency
+  const dur=0.55;
+  const len=Math.floor(audioCtx.sampleRate*dur);
+  const buf=audioCtx.createBuffer(1,len,audioCtx.sampleRate);
+  const d=buf.getChannelData(0);
+  for(let i=0;i<len;i++)d[i]=Math.random()*2-1;
+
+  const src=audioCtx.createBufferSource();
+  src.buffer=buf;
+
+  // Bandpass sweeps upward — low rush → high air
+  const flt=audioCtx.createBiquadFilter();
+  flt.type='bandpass'; flt.Q.value=1.8;
+  flt.frequency.setValueAtTime(300,audioCtx.currentTime);
+  flt.frequency.exponentialRampToValueAtTime(2400,audioCtx.currentTime+dur);
+
+  const g=audioCtx.createGain();
+  g.gain.setValueAtTime(0,audioCtx.currentTime);
+  g.gain.linearRampToValueAtTime(0.5,audioCtx.currentTime+0.04); // quick attack
+  g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+dur);
+
+  src.connect(flt);flt.connect(g);g.connect(audioCtx.destination);
+  src.start();
+}
+
+function sfxLand(impact){
+  if(!audioCtx)return;
+  const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type='sine';
+  o.frequency.setValueAtTime(90,audioCtx.currentTime);
+  o.frequency.exponentialRampToValueAtTime(28,audioCtx.currentTime+0.18);
+  const vol=Math.min(0.5,impact/900);
+  g.gain.setValueAtTime(vol,audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+0.22);
+  o.connect(g);g.connect(audioCtx.destination);
+  o.start();o.stop(audioCtx.currentTime+0.22);
+}
+
+function sfxBoom(){
+  if(!audioCtx)return;
+  // Filtered noise burst
+  const len=audioCtx.sampleRate*0.35;
+  const buf=audioCtx.createBuffer(1,len,audioCtx.sampleRate);
+  const data=buf.getChannelData(0);
+  for(let i=0;i<len;i++)data[i]=Math.random()*2-1;
+  const src=audioCtx.createBufferSource();
+  src.buffer=buf;
+  const flt=audioCtx.createBiquadFilter();
+  flt.type='lowpass';flt.frequency.value=280;
+  const g=audioCtx.createGain();
+  g.gain.setValueAtTime(0.55,audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+0.35);
+  src.connect(flt);flt.connect(g);g.connect(audioCtx.destination);
+  src.start();
+}
+
+function sfxTack(){
+  if(!audioCtx)return;
+  const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type='square';o.frequency.value=900;
+  g.gain.setValueAtTime(0.18,audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+0.06);
+  o.connect(g);g.connect(audioCtx.destination);
+  o.start();o.stop(audioCtx.currentTime+0.06);
+}
+
+function sfxWhoosh(){
+  if(!audioCtx)return;
+  // Chaser bullet warning — descending sweep
+  const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type='triangle';
+  o.frequency.setValueAtTime(380,audioCtx.currentTime);
+  o.frequency.exponentialRampToValueAtTime(80,audioCtx.currentTime+0.4);
+  g.gain.setValueAtTime(0.14,audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+0.4);
+  o.connect(g);g.connect(audioCtx.destination);
+  o.start();o.stop(audioCtx.currentTime+0.4);
+}
+
+/* ── STATE ────────────────────────────────────────────────────── */
+let gstate='menu',songTime=0,lastReal=0,tlIdx=0;
+let phase='day',baseSpeed=1,boostTimer=0,breathing=false,health=3,hasAudio=false;
+let worldX=0,dashOff=0,scrollSpd=T.scrollBase;
+let scr={cloud:0,mtn:0,far:0,near:0};
+let shakeAmp=0,shakeTime=0;
+function shake(amp,dur){shakeAmp=Math.max(shakeAmp,amp);shakeTime=Math.max(shakeTime,dur);}
+
+const pl={x:CAR_X,y:ROAD_BASE,vy:0,onGround:true,jumpsLeft:T.maxJumps,
+          inv:0,weapon:null,shootCd:0,tackCd:0,
+          flipAngle:0,flipping:false,flipDir:1};
+
+// Same-direction traffic (player overtakes from behind)
+let carTilt=0;       // smoothed tilt angle for player car (radians)
+let throttleMult=1;  // current throttle multiplier (1.0 = base, up to throttleMax)
+let traffic=[];
+// Chasers from behind
+let chasers=[];
+// Player bullets (fire RIGHT, forward)
+let pBullets=[];
+// Chaser bullets (fire RIGHT toward player)
+let cBullets=[];
+// Other entities
+let ramps=[],pickups=[],rockets=[],smokes=[],tacks=[],particles=[],debris=[],chasms=[];
+let chaserGlobalCd=0; // global cooldown shared across all chasers
+let scene={clouds:[],mountains:[],treesFar:[],treesNear:[]};
+
+const track=document.getElementById('track');
+track.src='music/Asphalt_Serpent.mp3';
+track.addEventListener('canplaythrough',()=>{hasAudio=true;},{once:true});
+
+const sx=wx=>pl.x+(wx-worldX);  // world → screen x
+
+/* ── INPUT ────────────────────────────────────────────────────── */
+const keys={};
+addEventListener('keydown',e=>{
+  keys[e.key]=true;
+  if(e.repeat)return;
+  if(e.key===' '){e.preventDefault();doJump();}
+  if(e.key==='f'||e.key==='F'||e.key==='x'||e.key==='X')shootForward();
+  if(e.key==='s'||e.key==='S')deployTacks();
+});
+addEventListener('keyup',e=>{keys[e.key]=false;});
+cv.addEventListener('pointerdown',e=>{
+  const r=cv.getBoundingClientRect();
+  const rel=(e.clientY-r.top)/r.height;
+  const relX=(e.clientX-r.left)/r.width;
+  if(rel<0.35) doJump();
+  else if(rel>0.75&&relX<0.5) deployTacks();
+  else if(rel>0.75&&relX>=0.5) shootForward();
+  // middle zone = throttle (handled via pointer hold)
+});
+
+function doJump(){
+  if(gstate!=='playing')return;
+  if(pl.jumpsLeft>0){
+    pl.vy=pl.jumpsLeft===T.maxJumps?T.jumpVel:T.jumpVel2;
+    pl.onGround=false;pl.jumpsLeft--;
+    burst(pl.x,pl.y,'dust');
+    sfxJump();
+  } else if(!pl.onGround&&!pl.flipping){
+    // No jumps left — do a backflip instead
+    pl.flipping=true;
+    pl.flipAngle=0;
+    pl.flipDir=1; // clockwise backflip
+    burst(pl.x,pl.y,'dust');
+  }
+}
+function shootForward(){
+  if(gstate!=='playing')return;
+  if(pl.shootCd<=0){
+    pBullets.push({wx:worldX+pl.x+30,y:pl.y-8});
+    pl.shootCd=0.25;
+  }
+}
+function deployTacks(){
+  // Rear tack strip — always available, short cooldown
+  if(gstate!=='playing'||pl.tackCd>0)return;
+  tacks.push({wx:worldX+pl.x-10,life:9,used:false});
+  pl.tackCd=5.0;
+  sfxTack();
+  burst(pl.x,pl.y+4,'dust');
+  document.getElementById('weapon').textContent='TACKS!';
+  setTimeout(()=>{document.getElementById('weapon').textContent='READY';},1200);
+  setTimeout(()=>{document.getElementById('weapon').textContent='—';},5000);
+}
+
+/* ── TIMELINE ─────────────────────────────────────────────────── */
+function fireEvent(ev){
+  if(ev.type==='phase')    phase=ev.v;
+  if(ev.type==='speed'){   baseSpeed=ev.v;document.getElementById('spd').textContent=ev.v.toFixed(1)+'×';}
+  if(ev.type==='traffic')  for(let i=0;i<(ev.v||1);i++)setTimeout(spawnTraffic,i*700);
+  if(ev.type==='chaser')   for(let i=0;i<(ev.v||1);i++)setTimeout(spawnChaser,i*800);
+  if(ev.type==='ramp')     spawnRamp();
+  if(ev.type==='chasm')    spawnChasm(ev.v);
+  if(ev.type==='debris')   spawnDebris(ev.v||1);
+  if(ev.type==='pickup')   spawnPickup(ev.v);
+  if(ev.type==='rocket')   spawnRocket();
+  if(ev.type==='breather'){breathing=true;setTimeout(()=>breathing=false,8000);}
+}
+
+/* ── SPAWNERS ─────────────────────────────────────────────────── */
+const AHEAD=W*1.3;
+
+function spawnTraffic(){
+  // Same-direction car: player approaches from behind and overtakes.
+  // Airborne variant: spawns above road level (jump over without landing).
+  const air=Math.random()<0.2;
+  traffic.push({
+    wx:worldX+AHEAD,
+    vx:T.trafficSpeed,      // advances forward at this world speed
+    yOff:air?-(48+Math.random()*36):0,
+    w:44,h:26,
+    color:['#5a5a7a','#4a6a4a','#6a4a4a','#5a6a7a'][Math.floor(Math.random()*4)],
+    enemy:Math.random()<0.3, // enemy cars can shoot backward
+    shootCd:3+Math.random()*2,
+    dead:false,
+  });
+}
+function spawnChaser(){
+  chasers.push({wx:worldX-CAR_X+8,shootCd:T.chaserShootCd+Math.random()*2,
+    slow:0,spin:0,ang:0,dead:false});
+}
+function spawnRamp(){ramps.push({wx:worldX+AHEAD,used:false});}
+function spawnChasm(width){
+  const w=width||(380+Math.random()*140);   // 380–520px gap
+  const lipWx=worldX+AHEAD;                 // where the road ends
+  // Auto-ramp at the lip — player needs the launch to clear
+  ramps.push({wx:lipWx-200,used:false});
+  chasms.push({wxStart:lipWx, wxEnd:lipWx+w, dead:false});
+}
+function spawnDebris(count){
+  // Static road obstacles — barrels, crates, rocks. Player must jump them.
+  const types=['barrel','crate','rock','log'];
+  for(let i=0;i<(count||1);i++){
+    const gap=180+Math.random()*120; // space between clusters
+    debris.push({
+      wx:worldX+AHEAD+i*gap,
+      type:types[Math.floor(Math.random()*types.length)],
+      w:22+Math.random()*14, h:24+Math.random()*14,
+      dead:false,
+    });
+  }
+}
+function spawnPickup(wtype){
+  const t=wtype||(Math.random()<0.5?'smoke':'tack');
+  pickups.push({wx:worldX+AHEAD*0.7,wtype:t,bob:Math.random()*Math.PI*2,dead:false});
+}
+function spawnRocket(){
+  const yOff=Math.random()<0.4?-(50+Math.random()*60):0;
+  rockets.push({wx:worldX+AHEAD*1.15,yOff,phase:'warn',timer:T.rocketWarn,dead:false});
+}
+function burst(x,y,type){
+  if(type==='dust')for(let i=0;i<7;i++)particles.push({x,y,vx:(Math.random()-.5)*90,
+    vy:-35-Math.random()*65,life:.4,max:.4,type:'dust'});
+  else if(type==='boom')for(let i=0;i<14;i++){const a=i/14*Math.PI*2,s=85+Math.random()*130;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:.55,max:.55,type:'fire'});}
+  else if(type==='land')for(let i=0;i<9;i++)particles.push({x,y,vx:(Math.random()-.5)*130,
+    vy:-22-Math.random()*38,life:.3,max:.3,type:'dust'});
+  else if(type==='hit')for(let i=0;i<8;i++)particles.push({x,y,vx:(Math.random()-.5)*60,
+    vy:-20-Math.random()*50,life:.3,max:.3,type:'fire'});
+}
+
+/* ── DAMAGE / HEAL ────────────────────────────────────────────── */
+function damage(){
+  if(pl.inv>0)return;
+  health=Math.max(0,health-1);pl.inv=T.invTime;
+  burst(pl.x,pl.y,'boom');drawHp();
+  shake(11,0.28);sfxBoom();
+  if(health<=0)finish(false);
+}
+function heal(){health=Math.min(3,health+1);drawHp();}
+function drawHp(){document.getElementById('hp').textContent='♥'.repeat(health)+'♡'.repeat(3-health);}
+
+/* ── SCENERY ──────────────────────────────────────────────────── */
+function buildScene(){
+  scene.clouds=Array.from({length:14},(_,i)=>({x:i*280+Math.random()*180,
+    y:H*.04+Math.random()*H*.28,w:90+Math.random()*160,h:22+Math.random()*28}));
+  scene.mountains=Array.from({length:22},(_,i)=>({x:i*240+Math.random()*120,
+    w:200+Math.random()*220,h:85+Math.random()*140}));
+  scene.treesFar=Array.from({length:45},(_,i)=>({x:i*120+Math.random()*70,
+    h:55+Math.random()*65,w:20+Math.random()*16}));
+  scene.treesNear=Array.from({length:32},(_,i)=>({x:i*170+Math.random()*90,
+    h:72+Math.random()*95,w:26+Math.random()*20,bld:Math.random()<.28,
+    bh:44+Math.random()*55,bw:26+Math.random()*18,
+    wins:Array.from({length:6},()=>({lit:Math.random()>.3,fy:.2+Math.random()*.6,fx:.1+Math.random()*.7}))}));
+}
+
+/* ── MAIN LOOP ────────────────────────────────────────────────── */
+function loop(now){
+  if(gstate!=='playing')return;
+  const dt=Math.min(0.05,(now-lastReal)/1000);lastReal=now;
+  songTime=hasAudio?track.currentTime:songTime+dt;
+  while(tlIdx<TIMELINE.length&&songTime>=TIMELINE[tlIdx].t){fireEvent(TIMELINE[tlIdx]);tlIdx++;}
+  const len=hasAudio?(track.duration||SONG_LEN):SONG_LEN;
+  if(songTime>=len)return finish(true);
+  update(dt);render();
+  document.getElementById('tlfill').style.width=Math.min(100,songTime/len*100)+'%';
+  requestAnimationFrame(loop);
+}
+
+/* ── UPDATE ───────────────────────────────────────────────────── */
+function update(dt){
+  // Hill speed using smoothstep terrain slope — gentler effect
+  const slope=terrainSlope(worldX);
+  // Throttle: Up arrow / ArrowUp builds speed, releases decay back
+  const throttling = keys['ArrowUp'] || keys['w'] || keys['W'];
+  if(throttling) throttleMult=Math.min(T.throttleMax, throttleMult+T.throttleAccel*dt);
+  else           throttleMult=Math.max(1.0, throttleMult-T.throttleDecay*dt);
+
+  const boost=boostTimer>0?T.boostMult:1;
+  const sp=(breathing?.55:1)*baseSpeed*boost*throttleMult;
+  const hillMult=Math.max(0.72,Math.min(2.2,1+slope*T.hillSpeedMult));
+  const targetSpd=T.scrollBase*sp*hillMult;
+  // Momentum: quicker to gain speed downhill, slower to lose it uphill
+  const lag=targetSpd>scrollSpd?3.5:2.0;
+  scrollSpd+=(targetSpd-scrollSpd)*Math.min(1,dt*lag);
+
+  if(boostTimer>0)boostTimer-=dt;
+
+  worldX+=scrollSpd*dt;
+  dashOff=(dashOff+scrollSpd*dt)%120;
+  scr.cloud+=scrollSpd*.07*dt;
+  scr.mtn+=scrollSpd*.17*dt;
+  scr.far+=scrollSpd*.31*dt;
+  scr.near+=scrollSpd*.54*dt;
+
+  if(pl.shootCd>0)pl.shootCd-=dt;
+  if(pl.tackCd>0)pl.tackCd-=dt;
+  if(shakeTime>0){shakeTime-=dt;shakeAmp*=0.88;}else shakeAmp=0;
+  updateEngineSound(scrollSpd);
+  // Flip animation — 360° backflip in ~0.4s
+  if(pl.flipping){
+    pl.flipAngle+=pl.flipDir*dt*Math.PI*5; // π*5 rad/s = ~0.4s full rotation
+    if(Math.abs(pl.flipAngle)>=Math.PI*2){pl.flipping=false;pl.flipAngle=0;}
+  }
+
+  /* ── Player terrain physics (reference model) ──
+     No launch calculation. Terrain drops away → car is now above it →
+     gravity pulls car down naturally. Air time comes from terrain shape,
+     not from code deciding to throw the car upward. */
+  const inChasm=chasms.some(c=>worldX>c.wxStart&&worldX<c.wxEnd);
+  const groundY=inChasm ? H+100 : terrainY(worldX);
+
+  if(pl.y < groundY || pl.vy < 0){
+    // Airborne: car is above terrain surface — apply gravity
+    pl.vy=Math.min(pl.vy+T.gravity*dt, T.maxFall);
+    pl.y+=pl.vy*dt;
+    pl.onGround=false;
+    // Landing check
+    if(pl.y>=groundY){
+      const impact=pl.vy;
+      pl.y=groundY; pl.vy=0; pl.onGround=true; pl.jumpsLeft=T.maxJumps;
+      if(impact>150){ burst(pl.x,pl.y,'land'); shake(impact/55,0.14); sfxLand(impact); }
+    }
+  } else {
+    // On terrain
+    if(!pl.onGround){
+      // Just landed
+      if(pl.vy>150){ burst(pl.x,pl.y,'land'); shake(pl.vy/55,0.14); sfxLand(pl.vy); }
+      pl.jumpsLeft=T.maxJumps;
+      pl.flipping=false; pl.flipAngle=0;
+    }
+    // Carry slope momentum — terrain rising pushes car upward.
+    // At the peak this upward vy is preserved into the air naturally.
+    const slopeVy=terrainSlope(worldX)*scrollSpd;
+    pl.y=groundY;
+    // Only carry UPWARD slope momentum (negative vy = up); flatten on downhills
+    pl.vy=slopeVy<0 ? slopeVy*1.6 : 0;
+    pl.onGround=true;
+  }
+
+  // Fell into a chasm — damage and snap to far edge
+  if(inChasm&&pl.y>H-20){
+    damage();
+    shake(14,0.35);
+    const c=chasms.find(c=>worldX>c.wxStart&&worldX<c.wxEnd);
+    if(c){worldX=c.wxEnd+30;pl.y=terrainY(worldX);pl.vy=0;pl.onGround=true;}
+  }
+
+  if(pl.inv>0)pl.inv-=dt;
+
+  // Smooth tilt: amplified slope angle, holds briefly when airborne
+  // Multiply slope by 2 so tilt is visible on both up and downhill sections
+  const targetTilt = pl.onGround ? Math.atan(terrainSlope(worldX) * 2.2) : carTilt * 0.85;
+  carTilt += (targetTilt - carTilt) * Math.min(1, dt * 8);
+
+  /* ── Traffic (same direction) ──
+     These cars travel forward at vx world speed, slower than player.
+     In screen space they approach from the right as player overtakes. */
+  traffic.forEach(e=>{
+    e.wx+=e.vx*dt;  // car advances forward (but slower than player)
+    e.screenY=terrainY(e.wx)+e.yOff;
+    const ex=sx(e.wx);
+    // Enemy cars can shoot backward (toward player = rightward toward us = leftward on screen)
+    // Actually enemy traffic shoots in the same forward direction...
+    // For now: touching them = damage
+    if(Math.abs(ex-pl.x)<26&&Math.abs(pl.y-e.screenY)<20)damage();
+  });
+  traffic=traffic.filter(e=>!e.dead&&sx(e.wx)>-80&&sx(e.wx)<W+60);
+
+  /* ── Player bullets — fire rightward in world space ── */
+  pBullets.forEach(b=>{
+    b.wx+=(scrollSpd+T.bulletFwd)*dt;
+    // Stop if bullet hits terrain
+    if(b.y>=terrainY(b.wx))b.dead=true;
+    // Hit traffic car
+    for(const e of traffic){
+      if(!e.dead&&Math.abs(sx(b.wx)-sx(e.wx))<28&&Math.abs(b.y-e.screenY)<18){
+        e.dead=true;b.dead=true;burst(sx(e.wx),e.screenY,'boom');
+      }
+    }
+  });
+  pBullets=pBullets.filter(b=>!b.dead&&sx(b.wx)<W+20);
+
+  /* ── Ramps ── */
+  ramps.forEach(r=>{
+    r.screenY=terrainY(r.wx);
+    if(!r.used&&Math.abs(sx(r.wx)-pl.x)<40&&pl.onGround){
+      pl.vy=T.jumpVel*1.45;pl.onGround=false;pl.jumpsLeft=0;r.used=true;
+      burst(pl.x,pl.y,'dust');shake(5,0.10);
+    }
+  });
+  ramps=ramps.filter(r=>sx(r.wx)>-80);
+
+  /* ── Debris — static road obstacles, jump over them ── */
+  debris.forEach(d=>{
+    d.screenY=terrainY(d.wx);
+    const ex=sx(d.wx);
+    // Collision: only when on-ground (airborne = you cleared it)
+    if(pl.onGround&&Math.abs(ex-pl.x)<(d.w*0.5+18)&&Math.abs(pl.y-d.screenY)<d.h){
+      damage();d.dead=true;burst(pl.x,pl.y,'boom');
+    }
+    // Bullet destroys debris
+    for(const b of pBullets){
+      if(!b.dead&&!d.dead&&Math.abs(sx(b.wx)-ex)<d.w*0.5&&Math.abs(b.y-d.screenY)<d.h+10){
+        d.dead=true;b.dead=true;burst(ex,d.screenY,'boom');
+      }
+    }
+  });
+  debris=debris.filter(d=>!d.dead&&sx(d.wx)>-80);
+
+  /* ── Pickups ── */
+  pickups.forEach(pk=>{
+    pk.bob+=dt*3.5;
+    pk.screenY=terrainY(pk.wx)-20+Math.sin(pk.bob)*5;
+    if(Math.abs(sx(pk.wx)-pl.x)<30&&Math.abs(pl.y-pk.screenY)<28){
+      if(pk.wtype==='boost'){
+        boostTimer=T.boostDur;
+        document.getElementById('weapon').textContent='BOOST!';
+        setTimeout(()=>{if(!pl.weapon)document.getElementById('weapon').textContent='—';},
+          T.boostDur*1000);
+      } else {
+        pl.weapon=pk.wtype;
+        document.getElementById('weapon').textContent=pk.wtype==='smoke'?'SMOKE':'TACKS';
+      }
+      pk.dead=true;
+    }
+  });
+  pickups=pickups.filter(pk=>!pk.dead&&sx(pk.wx)>-50);
+
+  /* ── Rockets ── */
+  rockets.forEach(r=>{
+    r.timer-=dt;
+    r.screenY=terrainY(r.wx)+r.yOff;
+    if(r.phase==='warn'&&r.timer<=0){r.phase='strike';r.timer=0.3;}
+    if(r.phase==='strike'){
+      if(Math.abs(sx(r.wx)-pl.x)<46&&Math.abs(pl.y-r.screenY)<40)damage();
+      if(r.timer<=0){burst(sx(r.wx),r.screenY,'boom');shake(9,0.22);r.dead=true;}
+    }
+  });
+  rockets=rockets.filter(r=>!r.dead&&sx(r.wx)>-60);
+
+  /* ── Deployables ── */
+  smokes.forEach(s=>s.life-=dt);
+  smokes=smokes.filter(s=>s.life>0&&sx(s.wx)<W+80);
+  tacks.forEach(t=>t.life-=dt);
+  tacks=tacks.filter(t=>!t.used&&t.life>0&&sx(t.wx)<W+80);
+
+  /* ── Chasers ──
+     Advance with world scroll + close toward formation.
+     Screen x target = pl.x - chaserGap. */
+  chasers.forEach(c=>{
+    if(c.spin>0){c.spin-=dt;c.ang+=dt*16;if(c.spin<=0)c.dead=true;return;}
+    if(c.slow>0)c.slow-=dt;
+    const slowed=c.slow>0;
+    c.wx+=scrollSpd*dt;  // keep up with world
+    const cur=sx(c.wx),tgt=pl.x-T.chaserGap,diff=tgt-cur;
+    const rate=(slowed?25:T.chaserCloseSpd)*dt;
+    c.wx+=diff>0?Math.min(diff,rate):Math.max(diff,-rate);
+    for(const t of tacks)if(!t.used&&Math.abs(sx(t.wx)-sx(c.wx))<36){c.spin=0.9;t.used=true;}
+    for(const s of smokes)if(Math.abs(sx(s.wx)-sx(c.wx))<70)c.slow=3.5;
+    c.shootCd-=dt;
+    if(c.shootCd<=0&&chaserGlobalCd<=0&&!slowed&&Math.abs(sx(c.wx)-tgt)<60){
+      cBullets.push({wx:c.wx+22,y:terrainY(c.wx)-10});
+      c.shootCd=T.chaserShootCd+Math.random()*3;
+      chaserGlobalCd=T.chaserGlobalCd;
+      sfxWhoosh();
+    }
+  });
+  chasers=chasers.filter(c=>!c.dead);
+  if(chaserGlobalCd>0)chaserGlobalCd-=dt;
+
+  /* ── Chaser bullets — stop when they hit rising terrain ── */
+  cBullets.forEach(b=>{
+    b.wx+=(scrollSpd+T.bulletBack)*dt;
+    // Terrain collision: if terrain has risen to meet bullet, kill it
+    if(b.y>=terrainY(b.wx)-2)b.dead=true;
+  });
+  cBullets=cBullets.filter(b=>{
+    if(b.dead)return false;
+    if(Math.abs(sx(b.wx)-pl.x)<26&&Math.abs(b.y-pl.y)<20){damage();return false;}
+    return sx(b.wx)<W+20;
+  });
+
+  /* ── Particles ── */
+  particles.forEach(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=300*dt;p.life-=dt;});
+  particles=particles.filter(p=>p.life>0);
+}
+
+/* ── RENDER ───────────────────────────────────────────────────── */
+function render(){
+  const p=PHASES[phase];
+
+  // Screen shake — offset entire canvas draw
+  ctx.save();
+  if(shakeAmp>0.5){
+    const dx=(Math.random()-0.5)*shakeAmp*2;
+    const dy=(Math.random()-0.5)*shakeAmp*2;
+    ctx.translate(dx,dy);
+  }
+
+  // Sky
+  const sky=ctx.createLinearGradient(0,0,0,ROAD_BASE-40);
+  sky.addColorStop(0,p.skyTop);sky.addColorStop(1,p.skyBot);
+  ctx.fillStyle=sky;ctx.fillRect(0,0,W,H);
+
+  // Sun/moon
+  const sunX=W*.80,sunY=H*.17;
+  ctx.globalAlpha=.28;ctx.fillStyle=p.sunGlow;
+  ctx.beginPath();ctx.arc(sunX,sunY,52,0,Math.PI*2);ctx.fill();
+  ctx.globalAlpha=1;ctx.fillStyle=p.sun;
+  ctx.beginPath();ctx.arc(sunX,sunY,20,0,Math.PI*2);ctx.fill();
+
+  if(phase==='night'){ctx.fillStyle='rgba(255,255,255,0.65)';
+    for(let i=0;i<90;i++)ctx.fillRect((i*137+11)%W,(i*97+17)%(ROAD_BASE*.8),1,1);}
+
+  // Clouds
+  scene.clouds.forEach(c=>{
+    const cx=((c.x-scr.cloud)%3800+3800)%3800-180;
+    if(cx<-180||cx>W+180)return;
+    ctx.globalAlpha=.16;ctx.fillStyle=p.cloud;
+    ctx.beginPath();ctx.ellipse(cx,c.y,c.w/2,c.h/2,0,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+  });
+
+  // Mountains
+  ctx.fillStyle=p.mtn;
+  scene.mountains.forEach(m=>{
+    const mx=((m.x-scr.mtn)%5280+5280)%5280-220;
+    if(mx<-240||mx>W+240)return;
+    ctx.beginPath();ctx.moveTo(mx-m.w/2,ROAD_BASE+10);
+    ctx.lineTo(mx,ROAD_BASE+10-m.h);ctx.lineTo(mx+m.w/2,ROAD_BASE+10);ctx.closePath();ctx.fill();
+  });
+
+  // Far trees
+  ctx.fillStyle=p.treeFar;
+  scene.treesFar.forEach(t=>{
+    const tx=((t.x-scr.far)%5400+5400)%5400-80;
+    if(tx<-80||tx>W+80)return;
+    const by=ROAD_BASE+5;
+    ctx.fillRect(tx-t.w*.14,by-t.h,t.w*.28,t.h*.55);
+    ctx.beginPath();ctx.ellipse(tx,by-t.h*.65,t.w*.48,t.h*.48,0,0,Math.PI*2);ctx.fill();
+  });
+
+  // Near trees + buildings
+  scene.treesNear.forEach(t=>{
+    const tx=((t.x-scr.near)%5440+5440)%5440-100;
+    if(tx<-110||tx>W+110)return;
+    const by=ROAD_BASE+5;
+    ctx.fillStyle=p.treeNear;
+    if(t.bld){
+      const bx=tx+t.w*.35;
+      ctx.fillRect(bx-t.bw/2,by-t.bh,t.bw,t.bh);
+      if(phase==='night'){ctx.fillStyle='rgba(255,235,110,0.68)';
+        t.wins.forEach(w=>{if(w.lit)ctx.fillRect(bx-t.bw/2+w.fx*t.bw,by-t.bh+w.fy*t.bh,t.bw*.18,t.bh*.10);});}
+      ctx.fillStyle=p.treeNear;
+    }
+    ctx.fillRect(tx-t.w*.16,by-t.h,t.w*.32,t.h*.5);
+    ctx.beginPath();ctx.ellipse(tx,by-t.h*.62,t.w*.52,t.h*.52,0,0,Math.PI*2);ctx.fill();
+  });
+
+  // Road terrain polygon — screen x maps to world x via: wx = worldX + (x - CAR_X)
+  ctx.fillStyle=p.ground;
+  ctx.beginPath();ctx.moveTo(0,H);
+  for(let x=0;x<=W;x+=4)ctx.lineTo(x,terrainY(worldX+x-CAR_X)+7);
+  ctx.lineTo(W,H);ctx.closePath();ctx.fill();
+
+  ctx.fillStyle=p.road;
+  ctx.beginPath();ctx.moveTo(0,H);
+  for(let x=0;x<=W;x+=4)ctx.lineTo(x,terrainY(worldX+x-CAR_X)+2);
+  ctx.lineTo(W,H);ctx.closePath();ctx.fill();
+
+  // Road edge highlight
+  ctx.strokeStyle='rgba(255,255,255,0.13)';ctx.lineWidth=2;ctx.setLineDash([]);
+  ctx.beginPath();
+  for(let x=0;x<=W;x+=4){const y=terrainY(worldX+x-CAR_X);x===0?ctx.moveTo(0,y):ctx.lineTo(x,y);}
+  ctx.stroke();
+
+  // Center dashes
+  ctx.strokeStyle=p.roadLine;ctx.lineWidth=2;ctx.setLineDash([36,36]);ctx.lineDashOffset=-dashOff;
+  ctx.beginPath();
+  for(let x=0;x<=W;x+=4){const y=terrainY(worldX+x-CAR_X)+20;x===0?ctx.moveTo(0,y):ctx.lineTo(x,y);}
+  ctx.stroke();ctx.setLineDash([]);
+
+  // Chasms — punch a void in the road
+  chasms.forEach(c=>{
+    const x0=sx(c.wxStart),x1=sx(c.wxEnd);
+    if(x1<-20||x0>W+20)return;
+    const cx0=Math.max(0,x0),cx1=Math.min(W,x1);
+    const lyL=terrainY(c.wxStart), lyR=terrainY(c.wxEnd);
+    // Deep void
+    const vg=ctx.createLinearGradient(0,lyL,0,H);
+    vg.addColorStop(0,'rgba(0,0,0,0.98)');vg.addColorStop(1,'#050508');
+    ctx.fillStyle=vg;
+    ctx.fillRect(cx0,lyL,cx1-cx0,H-lyL+4);
+    // Left cliff face
+    if(x0>0&&x0<W){
+      ctx.fillStyle='#1a1a28';
+      ctx.fillRect(x0-8,lyL,10,H-lyL);
+      ctx.fillStyle='rgba(255,255,255,0.08)';
+      ctx.fillRect(x0+1,lyL,2,H-lyL);
+    }
+    // Right cliff face
+    if(x1>0&&x1<W){
+      ctx.fillStyle='#1a1a28';
+      ctx.fillRect(x1-2,lyR,10,H-lyR);
+    }
+    // Warning triangle if approaching from 300px away
+    if(x0>pl.x+20&&x0<pl.x+300){
+      const alpha=1-(x0-pl.x-20)/280;
+      ctx.globalAlpha=alpha;
+      ctx.fillStyle='#ff4400';
+      ctx.font='bold 18px VT323';ctx.textAlign='center';
+      ctx.fillText('▼ GAP ▼',x0+12,lyL-12);
+      ctx.globalAlpha=1;
+    }
+  });
+
+  // Ramps
+  ramps.forEach(r=>{
+    const rx=sx(r.wx),ry=r.screenY||ROAD_BASE;
+    if(rx<-60||rx>W+60)return;
+    ctx.fillStyle='#585878';
+    ctx.beginPath();ctx.moveTo(rx-44,ry+4);ctx.lineTo(rx+20,ry+4);ctx.lineTo(rx+20,ry-28);ctx.closePath();ctx.fill();
+    ctx.fillStyle='#8888aa';ctx.fillRect(rx-44,ry+1,64,4);
+  });
+
+  // Debris obstacles — barrels, crates, rocks
+  debris.forEach(d=>{
+    const dx=sx(d.wx),dy=d.screenY||ROAD_BASE;
+    if(dx<-80||dx>W+80)return;
+    const w=d.w,h=d.h;
+    if(d.type==='barrel'){
+      ctx.fillStyle='#7a3a2a';
+      ctx.fillRect(dx-w*0.5,dy-h,w,h);
+      ctx.fillStyle='#9a5a3a';
+      ctx.fillRect(dx-w*0.5,dy-h*0.72,w,h*0.16);
+      ctx.fillRect(dx-w*0.5,dy-h*0.36,w,h*0.16);
+    } else if(d.type==='crate'){
+      ctx.fillStyle='#7a6a3a';
+      ctx.fillRect(dx-w*0.5,dy-h,w,h);
+      ctx.strokeStyle='#5a4a2a';ctx.lineWidth=2;
+      ctx.strokeRect(dx-w*0.5,dy-h,w,h);
+      ctx.beginPath();ctx.moveTo(dx-w*0.5,dy-h);ctx.lineTo(dx+w*0.5,dy);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(dx+w*0.5,dy-h);ctx.lineTo(dx-w*0.5,dy);ctx.stroke();
+    } else if(d.type==='rock'){
+      ctx.fillStyle='#5a5a60';
+      ctx.beginPath();ctx.ellipse(dx,dy-h*0.5,w*0.6,h*0.5,0,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#7a7a80';
+      ctx.beginPath();ctx.ellipse(dx-w*0.15,dy-h*0.6,w*0.25,h*0.2,0,0,Math.PI*2);ctx.fill();
+    } else { // log
+      ctx.fillStyle='#6a4a2a';
+      ctx.beginPath();ctx.ellipse(dx,dy-h*0.4,w*0.6,h*0.4,0.3,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#4a3020';
+      ctx.beginPath();ctx.ellipse(dx,dy-h*0.4,w*0.6,h*0.4,0.3,0,Math.PI*2);
+      ctx.strokeStyle='#4a3020';ctx.lineWidth=3;ctx.stroke();
+    }
+  });
+
+  // Pickups
+  pickups.forEach(pk=>{
+    const pkx=sx(pk.wx),pky=pk.screenY||ROAD_BASE-20;
+    if(pkx<-40||pkx>W+40)return;
+    const isBoost=pk.wtype==='boost';
+    const col=isBoost?'#ffe060':pk.wtype==='smoke'?'#c8ccee':'#ffaa50';
+    const gl=isBoost?'rgba(255,224,80,.32)':pk.wtype==='smoke'?'rgba(200,204,238,.28)':'rgba(255,170,80,.28)';
+    ctx.globalAlpha=.32;ctx.fillStyle=gl;
+    ctx.beginPath();ctx.arc(pkx,pky,22,0,Math.PI*2);ctx.fill();
+    ctx.globalAlpha=1;ctx.fillStyle=col;
+    ctx.beginPath();ctx.arc(pkx,pky,10,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='rgba(0,0,0,0.6)';ctx.font='bold 10px VT323';ctx.textAlign='center';
+    ctx.fillText(isBoost?'GO':pk.wtype==='smoke'?'S':'T',pkx,pky+4);
+  });
+
+  // Tacks
+  tacks.forEach(t=>{
+    const tx=sx(t.wx),ty=terrainY(t.wx);
+    if(tx<-40||tx>W+60)return;
+    ctx.fillStyle='rgba(195,205,235,.14)';ctx.fillRect(tx-26,ty-2,52,8);
+    ctx.strokeStyle='rgba(180,190,220,.7)';ctx.lineWidth=1;
+    for(let i=-2;i<=2;i++){ctx.beginPath();ctx.moveTo(tx+i*10,ty-4);ctx.lineTo(tx+i*10,ty+6);ctx.stroke();}
+  });
+
+  // Smokes
+  smokes.forEach(s=>{
+    const smx=sx(s.wx),smy=terrainY(s.wx)-12;
+    if(smx<-60||smx>W+60)return;
+    ctx.globalAlpha=Math.max(0,s.life/2.5)*.5;ctx.fillStyle='#c8ccde';
+    ctx.beginPath();ctx.arc(smx,smy,20+(2.5-s.life)*18,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+  });
+
+  // Rockets
+  rockets.forEach(r=>{
+    const rx=sx(r.wx),ry=r.screenY||ROAD_BASE;
+    if(rx<-40||rx>W+80)return;
+    if(r.phase==='warn'){
+      const pulse=.5+.5*Math.sin(performance.now()/65);
+      ctx.globalAlpha=.35+.38*pulse;ctx.fillStyle='#ff2e88';
+      ctx.beginPath();ctx.arc(rx,ry,5,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle='#ff2e88';ctx.lineWidth=2.5;
+      ctx.beginPath();ctx.arc(rx,ry,16+pulse*10,0,Math.PI*2);ctx.stroke();
+      ctx.globalAlpha=.18+.18*pulse;
+      ctx.beginPath();ctx.moveTo(W+10,ry);ctx.lineTo(rx+20,ry);ctx.stroke();
+      ctx.globalAlpha=1;
+    } else {
+      const a=Math.max(0,r.timer/.3);
+      ctx.globalAlpha=a;ctx.fillStyle='#fff';
+      ctx.beginPath();ctx.arc(rx,ry,55*(1-a)+10,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+    }
+  });
+
+  // Traffic cars (same direction — player approaches from behind)
+  traffic.forEach(e=>{
+    const ex=sx(e.wx),ey=e.screenY||ROAD_BASE;
+    if(ex<-60||ex>W+60)return;
+    drawCar(ex,ey,e.w,e.h,e.color,false,Math.atan(terrainSlope(e.wx)));
+  });
+
+  // Player bullets (rightward)
+  pBullets.forEach(b=>{
+    const bx=sx(b.wx);
+    ctx.fillStyle='#16f0c8';ctx.fillRect(bx-2,b.y-8,14,5);
+    ctx.fillStyle='rgba(22,240,200,.35)';ctx.fillRect(bx-8,b.y-7,8,4);
+  });
+
+  // Chaser bullets (rightward toward player)
+  cBullets.forEach(b=>{
+    const bx=sx(b.wx);
+    ctx.fillStyle='#ffaa27';ctx.fillRect(bx-12,b.y-3,18,6);
+    ctx.fillStyle='rgba(255,170,39,.35)';ctx.fillRect(bx-18,b.y-2,8,4);
+  });
+
+  // Chasers
+  chasers.forEach(c=>{
+    const cx=sx(c.wx),cy=terrainY(c.wx);
+    if(c.spin>0){
+      ctx.save();ctx.translate(cx,cy);ctx.rotate(c.ang);
+      drawCar(0,0,40,24,'#ff8a4a',false);ctx.restore();
+    } else {
+      drawCar(cx,cy,40,24,'#e53935',false,Math.atan(terrainSlope(c.wx)));
+      if(c.slow>0){ctx.globalAlpha=.38;ctx.fillStyle='#c8ccde';
+        ctx.beginPath();ctx.arc(cx,cy,24,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;}
+    }
+  });
+
+  // Player shadow
+  const gY=terrainY(worldX);
+  const airH=Math.max(0,gY-pl.y);
+  const sA=pl.onGround?.22:Math.max(.04,.22-airH/320);
+  const sS=pl.onGround?1:Math.max(.25,1-airH/280);
+  ctx.globalAlpha=sA;ctx.fillStyle='#000';
+  ctx.beginPath();ctx.ellipse(pl.x,gY+7,28*sS,7*sS,0,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+
+  const blink=pl.inv>0&&Math.floor(performance.now()/80)%2===0;
+  if(!blink)drawCar(pl.x,pl.y,46,28,'#16f0c8',false,carTilt+(pl.flipping?pl.flipAngle:0));
+  if(pl.inv>0){
+    ctx.globalAlpha=.32+.28*Math.sin(performance.now()/50);
+    ctx.strokeStyle='#16f0c8';ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(pl.x,pl.y,32,0,Math.PI*2);ctx.stroke();ctx.globalAlpha=1;
+  }
+  if(boostTimer>0){
+    ctx.globalAlpha=.22+.18*Math.sin(performance.now()/80);
+    ctx.strokeStyle='#ffe060';ctx.lineWidth=3;
+    ctx.beginPath();ctx.arc(pl.x,pl.y,36,0,Math.PI*2);ctx.stroke();ctx.globalAlpha=1;
+  }
+
+  // Particles
+  particles.forEach(pt=>{
+    const a=pt.life/pt.max;
+    if(pt.type==='fire'){ctx.fillStyle=`rgba(255,${Math.floor(55+130*a)},0,${a})`;
+      const z=5*a+1;ctx.fillRect(pt.x-z/2,pt.y-z/2,z,z);}
+    else{ctx.fillStyle=`rgba(175,155,115,${a*.55})`;
+      const z=(1-a)*14+2;ctx.beginPath();ctx.arc(pt.x,pt.y,z,0,Math.PI*2);ctx.fill();}
+  });
+
+  ctx.restore(); // end screen shake
+}
+
+/* ── CAR DRAW ─────────────────────────────────────────────────── */
+function drawCar(x,y,w,h,color,faceLeft,angle=0){
+  ctx.save();
+  ctx.translate(x,y);
+  ctx.rotate(angle);
+  // Draw centered on origin (translate already moved us to x,y)
+  const x0=-w/2, y0=-h/2;
+  ctx.fillStyle=color;ctx.fillRect(x0,y0,w,h);
+  ctx.fillStyle=shade(color,-28);ctx.fillRect(x0+w*.17,y0-h*.3,w*.54,h*.33);
+  ctx.fillStyle='rgba(160,215,255,0.48)';
+  ctx.fillRect(x0+(faceLeft?w*.14:w*.3),y0-h*.25,w*.22,h*.26);
+  ctx.fillStyle='#111';
+  ctx.beginPath();ctx.arc(x0+w*.21,h/2,h*.34,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(x0+w*.79,h/2,h*.34,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#444';
+  ctx.beginPath();ctx.arc(x0+w*.21,h/2,h*.17,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(x0+w*.79,h/2,h*.17,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=faceLeft?'#ff4444':'#fff8a0';
+  ctx.fillRect(faceLeft?x0+2:x0+w-10,y0+h*.18,9,h*.28);
+  ctx.restore();
+}
+function shade(hex,a){
+  const n=parseInt(hex.replace('#',''),16);
+  return`rgb(${Math.max(0,Math.min(255,((n>>16)&255)+a))},${Math.max(0,Math.min(255,((n>>8)&255)+a))},${Math.max(0,Math.min(255,(n&255)+a))})`;
+}
+
+/* ── FLOW ─────────────────────────────────────────────────────── */
+function startGame(){
+  initAudio(); // first user gesture — safe to create AudioContext here
+  gstate='playing';songTime=0;tlIdx=0;baseSpeed=1;boostTimer=0;
+  phase='day';breathing=false;health=3;drawHp();
+  worldX=0;dashOff=0;scrollSpd=T.scrollBase;throttleMult=1;carTilt=0;
+  scr={cloud:0,mtn:0,far:0,near:0};
+  pl.y=terrainY(0);pl.vy=0;pl.onGround=true;
+  pl.jumpsLeft=T.maxJumps;pl.inv=0;pl.weapon=null;pl.shootCd=0;
+  traffic=[];chasers=[];pBullets=[];cBullets=[];
+  ramps=[];pickups=[];rockets=[];smokes=[];tacks=[];particles=[];debris=[];chasms=[];
+  chaserGlobalCd=0;pl.tackCd=0;pl.weapon=null;
+  pl.flipping=false;pl.flipAngle=0;
+  document.getElementById('weapon').textContent='—';
+  document.getElementById('spd').textContent='1.0×';
+  ['sstart','send'].forEach(id=>document.getElementById(id).classList.add('hidden'));
+  ['hud','tl'].forEach(id=>document.getElementById(id).classList.remove('hidden'));
+  if(hasAudio){track.currentTime=0;track.play().catch(()=>{});}
+  lastReal=performance.now();
+  requestAnimationFrame(loop);
+}
+function finish(won){
+  gstate='end';if(hasAudio)track.pause();
+  if(engineGain&&audioCtx)engineGain.gain.setTargetAtTime(0,audioCtx.currentTime,0.5);
+  ['hud','tl'].forEach(id=>document.getElementById(id).classList.add('hidden'));
+  document.getElementById('etitle').textContent=won?'ESCAPED':'WRECKED';
+  document.getElementById('esub').textContent=won
+    ?'You outran the whole song.':'The song kept going without you.';
+  document.getElementById('send').classList.remove('hidden');
+}
+document.getElementById('audio').addEventListener('change',e=>{
+  const f=e.target.files[0];if(!f)return;
+  track.src=URL.createObjectURL(f);hasAudio=true;
+});
+document.getElementById('go').onclick=startGame;
+document.getElementById('again').onclick=startGame;
+buildScene();
+</script>
+</body>
+</html>
